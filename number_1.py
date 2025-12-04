@@ -1,57 +1,4 @@
-# Практика 1 — Безопасный файловый менеджер (Python)
-# Автор: Автоматически сгенерировано (подготовлено для сдачи преподавателю)
-# Описание: Полнофункциональный консольный инструмент для безопасной работы с файлами,
-# поддерживает JSON/XML, ZIP (с защитой от ZIP-бомб), SQLite для аудита и пользователей.
 
-"""
-README
-======
-Цель: реализация безопасного файлового менеджера согласно требованиям задания.
-
-Состав:
-- Скрипт: Практика1_Разработка_безопасного_файлового_менеджера.py (этот файл)
-- БД: sqlite файл (по умолчанию secure_fm.db)
-- Рабочий каталог: ./sandbox_root (все операции ограничены этим каталогом)
-
-Запуск:
-python3 Практика1_Разработка_безопасного_файлового_менеджера.py --help
-
-Требования (рекомендуется):
-- Python 3.8+
-- Модули стандартной библиотеки (json, sqlite3, zipfile, hashlib и пр.)
-- Опционально: defusedxml (для безопасного парсинга XML). Если не установлен — используется
-  минимально безопасный парсинг с ограничениями.
-
-Ключевые меры безопасности, реализованные в коде:
-- Защита от обхода путей (Path Traversal): все пути нормализуются и проверяются на лежание
-  внутри предопределённого рабочего каталога (ROOT_DIR).
-- Безопасная десериализация JSON: стандартный модуль json используется, который не исполняет код.
-- Безопасный парсинг XML: пытаемся использовать defusedxml (если доступен); иначе используем
-  xml.etree.ElementTree с дополнительными ограничениями (отключены внешние сущности).
-- Защита от ZIP-бомб: при распаковке предварительно считаем суммарный заявленный размер
-  распакованных файлов (ZipInfo.file_size) и ограничиваем его (MAX_UNCOMPRESSED_BYTES).
-  Также ограничен максимальный размер отдельного файла и количество файлов.
-- Атомарные операции: запись выполняется через временный файл и os.replace (атомарная замена).
-  Для блокировок используется fcntl (POSIX) или msvcrt (Windows) для избегания race conditions.
-- БД и логирование: sqlite + подготовленные запросы (parametrized queries). Для аудита — триггеры
-  в БД и ручная запись в таблицу Operations при выполняемых действиях.
-- Хеширование паролей: PBKDF2-HMAC-SHA256 с солью и большим числом итераций.
-- Ограничения по размерам: MAX_FILE_SIZE и MAX_UNCOMPRESSED_BYTES находятся в конфиге.
-
----
-
-# SQL схема (исполняется из скрипта при первом запуске)
-# (Семантика: SQLite не поддерживает ENUM; используем TEXT с CHECK)
-
---
--- Таблицы создаются автоматически в коде. Ниже схема для справки.
---
-
--- Users: id (PK), username UNIQUE, password_hash, salt
--- Files: id (PK), filename, created_at, size, location, owner_id
--- Operations: id (PK), timestamp, operation_type, file_id, user_id
-
-"""
 
 import argparse
 import os
@@ -67,15 +14,14 @@ import zipfile
 from contextlib import contextmanager
 from datetime import datetime
 
-# Attempt to import defusedxml for safe XML parsing
+
 try:
     from defusedxml import ElementTree as DefusedET
     _XML_PARSER = 'defusedxml'
 except Exception:
-    import xml.etree.ElementTree as DefusedET  # fallback
+    import xml.etree.ElementTree as DefusedET 
     _XML_PARSER = 'etree_fallback'
 
-# Cross-platform file locking
 try:
     import fcntl
     _HAS_FCNTL = True
@@ -87,18 +33,18 @@ except ImportError:
     except ImportError:
         _HAS_MSVCRT = False
 
-# Конфигурация безопасности
+
 ROOT_DIR = os.path.abspath('./sandbox_root')
 DB_PATH = os.path.join(ROOT_DIR, 'secure_fm.db')
 LOG_PATH = os.path.join(ROOT_DIR, 'app.log')
-MAX_FILE_SIZE = 10 * 1024 * 1024        # 10 MB на файл
-MAX_UNCOMPRESSED_BYTES = 100 * 1024 * 1024  # 100 MB суммарно при распаковке ZIP
+MAX_FILE_SIZE = 10 * 1024 * 1024        
+MAX_UNCOMPRESSED_BYTES = 100 * 1024 * 1024  
 MAX_ZIP_MEMBERS = 500
 PBKDF2_ITERATIONS = 200_000
 
 os.makedirs(ROOT_DIR, exist_ok=True)
 
-# --- Утилиты безопасности ---
+
 
 def ensure_within_root(path: str) -> str:
     abs_path = os.path.abspath(path)
@@ -148,7 +94,7 @@ def verify_password(password: str, dk_hex: str, salt_hex: str) -> bool:
     return dk.hex() == dk_hex
 
 
-# --- База данных и подготовленные запросы ---
+
 
 class DB:
     def __init__(self, path=DB_PATH):
@@ -168,7 +114,7 @@ class DB:
                 salt TEXT NOT NULL
             )
         ''')
-        # Files
+        
         cur.execute("""
             CREATE TABLE IF NOT EXISTS Files (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -179,7 +125,7 @@ class DB:
                 owner_id INT REFERENCES Users(id)
             );
             """)
-        # Operations
+        
         cur.execute('''
             CREATE TABLE IF NOT EXISTS Operations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -190,11 +136,10 @@ class DB:
             )
         ''')
 
-        # Триггер: при вставке/удалении/обновлении Files добавлять запись в Operations можно сделать
-        # программно: в коде после каждой успешной операции вставляем запись через подготовленные запросы.
+   
         cur.close()
 
-    # Prepared statements via parameterized queries
+
     def create_user(self, username: str, password: str):
         dk, salt = hash_password(password)
         cur = self.conn.cursor()
@@ -251,14 +196,13 @@ class DB:
         return rows
 
 
-# --- Файловые операции ---
 
 class FileManager:
     def __init__(self, db: DB):
         self.db = db
 
     def list_disks(self):
-        # Платформонезависимо: показываем доступное место для root и текущего FS
+      
         disks = []
         for path in [ROOT_DIR, os.path.abspath('.')]:
             try:
@@ -277,8 +221,7 @@ class FileManager:
         with open(path, 'rb') as f:
             with file_lock(f):
                 data = f.read()
-        # логируем: обновлять базу — находим или вставляем запись Files
-        # Простейшая логика: ищем файл в БД по location, иначе вставляем
+
         cur = self.db.conn.cursor()
         cur.execute('SELECT id FROM Files WHERE location = ?', (path,))
         row = cur.fetchone()
@@ -309,7 +252,7 @@ class FileManager:
                     os.remove(tmp)
                 except Exception:
                     pass
-        # Запись в БД
+        
         cur = self.db.conn.cursor()
         cur.execute('SELECT id FROM Files WHERE location = ?', (path,))
         row = cur.fetchone()
@@ -325,11 +268,11 @@ class FileManager:
     def delete_file(self, user_id: int, relpath: str):
         path = safe_join(ROOT_DIR, relpath)
 
-        # Проверяем, что файл существует
+       
         if not os.path.exists(path):
             raise FileNotFoundError(path)
 
-        # 1. Найти запись файла в БД
+  
         cur = self.db.conn.cursor()
         cur.execute("SELECT id FROM Files WHERE location = ?", (path,))
         row = cur.fetchone()
@@ -337,23 +280,20 @@ class FileManager:
 
         file_id = row[0] if row else None
 
-        # 2. Если файл есть в БД — удаляем запись
-        #    CASCADE автоматически удалит операции, связанные с file_id
+    
         if file_id:
             self.db.delete_file_record(file_id)
-
-        # 3. Удаляем физический файл
+      
         os.remove(path)
 
-        # 4. Логируем операцию удаления уже без file_id
         self.db.log_operation_no_file('delete', user_id)
 
         return True
 
-    # JSON/XML handlers
+   
     def read_json(self, user_id: int, relpath: str):
         text = self.read_file(user_id, relpath)
-        # безопасная десериализация
+     
         try:
             obj = json.loads(text)
         except json.JSONDecodeError as e:
@@ -361,13 +301,11 @@ class FileManager:
         return obj
 
     def write_json(self, user_id: int, relpath: str, obj):
-        # безопасная сериализация — явно контролируем типы (пример)
         text = json.dumps(obj, ensure_ascii=False, separators=(',', ':'))
         return self.write_file(user_id, relpath, text)
 
     def read_xml(self, user_id: int, relpath: str):
         text = self.read_file(user_id, relpath)
-        # безопасный парсер
         try:
             root = DefusedET.fromstring(text)
         except Exception as e:
@@ -378,7 +316,6 @@ class FileManager:
         text = DefusedET.tostring(element, encoding='utf-8')
         return self.write_file(user_id, relpath, text.decode('utf-8'))
 
-    # ZIP handling with anti-bomb checks
     def create_zip(self, user_id: int, relpath: str, sources: list):
         zippath = safe_join(ROOT_DIR, relpath)
         dirpath = os.path.dirname(zippath)
@@ -395,7 +332,7 @@ class FileManager:
                 else:
                     arcname = os.path.relpath(spath, ROOT_DIR)
                     zf.write(spath, arcname)
-        # DB insert
+
         fid = self.db.insert_file(os.path.basename(zippath), os.path.getsize(zippath), zippath, user_id)
         self.db.log_operation('create', fid, user_id)
         return True
@@ -414,11 +351,11 @@ class FileManager:
                     raise IOError('В архиве найден файл слишком большого размера')
                 if total_uncompressed > MAX_UNCOMPRESSED_BYTES:
                     raise IOError('Распаковываемые данные превышают разрешённый лимит')
-            # безопасная распаковка: проверка путей
+           
             for info in infos:
                 member_path = os.path.normpath(info.filename)
                 target = os.path.join(destpath, member_path)
-                # ensure within root
+               
                 ensure_within_root(target)
                 if info.is_dir():
                     os.makedirs(target, exist_ok=True)
@@ -427,7 +364,6 @@ class FileManager:
                     with zf.open(info, 'r') as src, open(target, 'wb') as dst:
                         with file_lock(dst):
                             shutil.copyfileobj(src, dst)
-            # Logging: create DB records for extracted files
             for info in infos:
                 target = os.path.join(destpath, os.path.normpath(info.filename))
                 if os.path.isfile(target):
@@ -436,13 +372,10 @@ class FileManager:
         return True
 
 
-# --- CLI и аутентификация ---
-
 def init_db_and_admin(db: DB):
-    # Создаём учётку admin, если нет
     row = db.get_user('admin')
     if not row:
-        pwd = 'admin'  # студенческая заметка: перед сдачей замените на уникальный пароль
+        pwd = 'admin' 
         uid = db.create_user('admin', pwd)
         print('Created default admin user with password:', pwd)
 
@@ -451,12 +384,11 @@ def main():
     parser = argparse.ArgumentParser(description='Secure File Manager — практика 1')
     sub = parser.add_subparsers(dest='cmd')
 
-    # user add
+  
     p_user = sub.add_parser('adduser')
     p_user.add_argument('username')
     p_user.add_argument('password')
 
-    # DOES NOT REQUIRE USERNAME
     sub.add_parser('listdisks')
 
     p_read = sub.add_parser('read')
@@ -487,9 +419,6 @@ def main():
     fm = FileManager(db)
     init_db_and_admin(db)
 
-    # ===============================
-    # 1) COMMANDS THAT DON'T NEED USER
-    # ===============================
 
     if args.cmd == 'adduser':
         uid = db.create_user(args.username, args.password)
@@ -500,10 +429,6 @@ def main():
         for d in fm.list_disks():
             print(d)
         return
-
-    # ===============================
-    # 2) EVERYTHING ELSE REQUIRES USER
-    # ===============================
 
     if not hasattr(args, 'username'):
         print("Error: this command requires a username.")
@@ -516,9 +441,6 @@ def main():
 
     user_id = user[0]
 
-    # ===============================
-    # EXECUTE USER-BASED COMMANDS
-    # ===============================
     if args.cmd == 'read':
         try:
             print(fm.read_file(user_id, args.path))
